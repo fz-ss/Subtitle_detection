@@ -192,7 +192,7 @@ def process_files_in_directory(
         file_path = os.path.join(directory, file)
         if sub_area is None or need_detection:
             need_detection = True
-            detector = SubtitleDetector(file_path, start_t=start_t, end_t=end_t)
+            detector = SubtitleDetector(file_path, begin_t=start_t, end_t=end_t)
             sub_area = detector.detect()[0][0]
         processor = SubtitleRemover(
             file_path, sub_area=sub_area, start_t=start_t, end_t=end_t
