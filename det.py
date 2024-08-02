@@ -53,12 +53,13 @@ class SubtitleDetector:
         self.use_deltime = use_deltime
         self.print_delrepeatoutlist = print_delrepeatoutlist
         self.height = 0
+        self.width = 0
         self.select_down = True
 
     def del_repeat(self, det_list):
         for i in range(len(det_list)):
             det_list[i].append(det_list[i][2] - det_list[i][1])
-            for j in range(i, len(det_list) - 1):
+            for j in range(i+1, len(det_list) ):
                 if max([abs(det_list[i][0][z] - det_list[j][0][z]) for z in range(2)]) < self.max_devloc:
                     det_list[i][0][0] = min(det_list[i][0][0], det_list[j][0][0])
                     det_list[i][0][1] = max(det_list[i][0][1], det_list[j][0][1])
@@ -86,14 +87,18 @@ class SubtitleDetector:
         reader = easyocr.Reader(["ch_sim"])
         det_list = []
         sub_starttime = 0
+        
         # 逐帧读取视频
         print(self.vd_path)
         print("检测中...")
+        last_text = False
         while True:
             # 读取视频帧
             ret, frame = cap.read()
             if self.height == 0:
-                self.height, _ = frame.shape[:2]
+                self.height, self.width = frame.shape[:2]
+                print(self.height, self.width)
+            
             if self.begin_t == None and self.end_t == None:
                 self.select_down = False
             if self.begin_t == None:
@@ -116,6 +121,7 @@ class SubtitleDetector:
                 and timestamp % self.det_time == 0
             ):  # timestamp >= begin_t and  timestamp<= end_t and
                 result = reader.readtext(frame)
+                last_text = (len(result) != 0) #有内容为True
                 # 获取当前帧的时间戳（单位为秒）
                 if self.print_time:
                     print(f"Timestamp: {timestamp} seconds")
@@ -154,15 +160,18 @@ class SubtitleDetector:
                     sub_endtime = timestamp
                     det_list.append([out_list, sub_starttime, sub_endtime])
                     sub_starttime = timestamp
+                elif last_text is False:
+                    sub_starttime = timestamp
+                
         if self.print_totaloutlist:
             print("det_list", det_list)
         det_list = self.del_repeat(det_list)
         if self.print_delrepeatoutlist:
             print(det_list)  # (y1, y2, x1, x2)
         det_list = [self.max_time(det_list)]
-        print(det_list)
+        percent_list=[det_list[0][0][0]/self.height,det_list[0][0][1]/self.height,det_list[0][0][2]/self.width,det_list[0][0][3]/self.width]
+        print( self.vd_path ,"Subtitle position",det_list)
+        print( self.vd_path ,"Subtitle precent",percent_list)
         # 释放视频对象
         cap.release()
-        # 关闭所有OpenCV窗口
-        cv2.destroyAllWindows()
-        return det_list
+        return det_list, percent_list
