@@ -11,12 +11,150 @@ import shutil
 import subprocess
 
 import cv2
+import easyocr
 import tqdm
 
-from backend import cfg
+import cfg
 from backend.inpaint.sttn_inpaint import STTNVideoInpaint
 from backend.tools.inpaint_tools import create_mask
-from det import SubtitleDetector
+
+# 定义一个红色字体的ANSI转义代码
+# RED_FONT = "\033[31m"
+# 重置所有文本属性的ANSI转义代码
+# END = "\033[0m"
+
+
+class SubtitleDetector:
+    """
+    det_time = 1 #自定义的检测时间
+    set_dettime = False #True时按照opencv的帧数, 为false时为自定义的检测时间
+    max_devloc = 50 #不同类型文本框沿y轴间的最大间距
+    print_res = False  # 输出所有的检测结果
+    print_time = False #输出时间, 单位秒(s)
+    print_selectres = False  #输出选中box的检测结果
+    print_totaloutlist = False  #输出所有的检测框和时间
+    print_delrepeatoutlist = True  #输出去重复之后的检测框和时间
+    """
+
+    def __init__(
+            self,
+            vd_path,
+            begin_t,
+            end_t,
+            det_time=1,
+            set_dettime=False,
+            max_devloc=50,
+            # print_res=False,
+            # print_time=False,
+            # print_selectres=False,
+            # print_totaloutlist=False,
+            # use_deltime=False,
+            # print_delrepeatoutlist=False,
+    ):
+        self.vd_path = vd_path
+        self.video_cap = cv2.VideoCapture(self.vd_path)
+        if not self.video_cap.isOpened():
+            print(f"Could not open video {self.vd_path}")
+            exit(1)
+        self.fps = self.video_cap.get(cv2.CAP_PROP_FPS)
+        self.frame_count = self.video_cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        self.frame_height = self.video_cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        self.begin_t = begin_t if begin_t else 0
+        self.end_t = end_t if end_t else self.frame_count / self.fps
+        self.det_time = det_time
+        self.set_dettime = set_dettime
+        self.max_devloc = max_devloc
+        # self.print_res = print_res
+        # self.print_time = print_time
+        # self.print_selectres = print_selectres
+        # self.print_totaloutlist = print_totaloutlist
+        # self.use_deltime = use_deltime
+        # self.print_delrepeatoutlist = print_delrepeatoutlist
+        self.select_down = True
+
+    def del_repeat(self, det_list):
+        for i in range(len(det_list)):
+            det_list[i].append(det_list[i][2] - det_list[i][1])
+            for j in range(i + 1, len(det_list)):
+                if max([abs(det_list[i][0][z] - det_list[j][0][z]) for z in range(2)]) < self.max_devloc:
+                    det_list[i][0][0] = min(det_list[i][0][0], det_list[j][0][0])
+                    det_list[i][0][1] = max(det_list[i][0][1], det_list[j][0][1])
+                    det_list[i][0][2] = min(det_list[i][0][2], det_list[j][0][2])
+                    det_list[i][0][3] = max(det_list[i][0][3], det_list[j][0][3])
+                    det_list[i][3] += det_list[j][2] - det_list[j][1]
+        return det_list
+
+    def max_time(self, det_list):
+        max_sub_video = 0
+        for i in range(len(det_list)):
+            if det_list[i][3] > det_list[max_sub_video][3]:
+                if self.select_down:
+                    max_sub_video = i
+                elif det_list[i][0][0] > self.frame_height / 2:
+                    max_sub_video = i
+        return det_list[max_sub_video][0], self.begin_t, self.end_t
+
+    def run(self):
+        reader = easyocr.Reader(
+            cfg.ocr_lang_list,
+            model_storage_directory=cfg.OCR_MODEL_DIR,
+            user_network_directory=cfg.OCR_MODEL_DIR,
+            # TODO: recognizer=False
+            recognizer=True
+        )
+        det_list = []
+        sub_start_t = 0
+        last_text = False
+        while True:
+            # 读取视频帧
+            ret, frame = self.video_cap.read()
+            if not ret:
+                print(f"Frame cannot be read {self.vd_path}")
+                break
+            if self.begin_t is None and self.end_t is None:
+                self.select_down = False
+            timestamp = self.video_cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+            if self.begin_t < timestamp < self.end_t and timestamp % self.det_time == 0:
+                result,_ = reader.detect(frame)
+                if not result:
+                    continue
+                result = result[0]
+                last_text = (len(result) != 0) #有内容为True
+                out_list=[]
+                if len(result) != 0:
+                    result = result[::-1]
+                    out_list=[result[0][2],result[0][3],result[0][0],result[0][1]]
+                    out_list = [max(0,int(i)) for i in out_list]
+                if (
+                        len(out_list) != 0
+                        and len(det_list) != 0
+                        and max([abs(out_list[i] - det_list[-1][0][i]) for i in range(2)]) < self.max_devloc
+                ):
+                    det_list[-1][0][0] = min(out_list[0], det_list[-1][0][0])
+                    det_list[-1][0][1] = max(out_list[1], det_list[-1][0][1])
+                    det_list[-1][0][2] = min(out_list[2], det_list[-1][0][2])
+                    det_list[-1][0][3] = max(out_list[3], det_list[-1][0][3])
+                    det_list[-1][2] = timestamp
+                    sub_start_t = timestamp
+                elif len(out_list) != 0:
+                    sub_end_t = timestamp
+                    det_list.append([out_list, sub_start_t, sub_end_t])
+                    sub_start_t = timestamp
+                elif last_text is False:
+                    sub_start_t = timestamp
+        # if self.print_totaloutlist:
+        #     print("det_list", det_list)
+        det_list = self.del_repeat(det_list)
+        # if self.print_delrepeatoutlist:
+        #     print(det_list)  # (y1, y2, x1, x2)
+        det_list = [self.max_time(det_list)]
+        print(det_list)
+        # 释放视频对象
+        self.video_cap.release()
+        # 关闭所有OpenCV窗口
+        cv2.destroyAllWindows()
+        return det_list[0][0]
+
 
 class SubtitleRemover:
 
@@ -193,18 +331,18 @@ def process_files_in_directory(
         if sub_area is None or need_detection:
             need_detection = True
             detector = SubtitleDetector(file_path, begin_t=start_t, end_t=end_t)
-            sub_area = detector.detect()[0][0]
-        processor = SubtitleRemover(
+            sub_area = detector.run()
+        remover = SubtitleRemover(
             file_path, sub_area=sub_area, start_t=start_t, end_t=end_t
         )
-        processor.run()
+        remover.run()
 
 
 if __name__ == "__main__":
     multiprocessing.set_start_method("spawn")
     parser = argparse.ArgumentParser(description="video subscript remover")
     parser.add_argument(
-        "--dir",
+        "--dir", default=cfg.INPUT_DIR,
         help="video absolute directory path"
     )
     parser.add_argument(
@@ -251,8 +389,8 @@ if __name__ == "__main__":
     remainder = num_videos % num_processes
     chunks = []
     chunk_start = 0
-    for i in range(num_processes):
-        if i < remainder:
+    for process_no in range(num_processes):
+        if process_no < remainder:
             chunk_end = chunk_start + chunk_size + 1
         else:
             chunk_end = chunk_start + chunk_size
