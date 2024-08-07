@@ -18,6 +18,7 @@ import cfg
 from backend.inpaint.sttn_inpaint import STTNVideoInpaint
 from backend.tools.inpaint_tools import create_mask
 
+
 # 定义一个红色字体的ANSI转义代码
 # RED_FONT = "\033[31m"
 # 重置所有文本属性的ANSI转义代码
@@ -42,8 +43,8 @@ class SubtitleDetector:
             begin_t,
             end_t,
             det_time=1,
-            set_dettime=False,
-            max_devloc=50,
+            # max_dev_loc=50,
+            # set_dettime=False
             # print_res=False,
             # print_time=False,
             # print_selectres=False,
@@ -52,18 +53,20 @@ class SubtitleDetector:
             # print_delrepeatoutlist=False,
     ):
         self.vd_path = vd_path
+        self.vd_name = pathlib.Path(self.vd_path).stem
         self.video_cap = cv2.VideoCapture(self.vd_path)
         if not self.video_cap.isOpened():
             print(f"Could not open video {self.vd_path}")
             exit(1)
         self.fps = self.video_cap.get(cv2.CAP_PROP_FPS)
         self.frame_count = self.video_cap.get(cv2.CAP_PROP_FRAME_COUNT)
-        self.frame_height = self.video_cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        self.frame_height = int(self.video_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self.frame_width = int(self.video_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.begin_t = begin_t if begin_t else 0
         self.end_t = end_t if end_t else self.frame_count / self.fps
         self.det_time = det_time
-        self.set_dettime = set_dettime
-        self.max_devloc = max_devloc
+        self.max_dev_loc = 0.06*self.frame_height
+        # self.set_dettime = set_dettime
         # self.print_res = print_res
         # self.print_time = print_time
         # self.print_selectres = print_selectres
@@ -76,7 +79,7 @@ class SubtitleDetector:
         for i in range(len(det_list)):
             det_list[i].append(det_list[i][2] - det_list[i][1])
             for j in range(i + 1, len(det_list)):
-                if max([abs(det_list[i][0][z] - det_list[j][0][z]) for z in range(2)]) < self.max_devloc:
+                if max([abs(det_list[i][0][z] - det_list[j][0][z]) for z in range(2)]) < self.max_dev_loc:
                     det_list[i][0][0] = min(det_list[i][0][0], det_list[j][0][0])
                     det_list[i][0][1] = max(det_list[i][0][1], det_list[j][0][1])
                     det_list[i][0][2] = min(det_list[i][0][2], det_list[j][0][2])
@@ -92,43 +95,45 @@ class SubtitleDetector:
                     max_sub_video = i
                 elif det_list[i][0][0] > self.frame_height / 2:
                     max_sub_video = i
-        return det_list[max_sub_video][0], self.begin_t, self.end_t
+        return [det_list[max_sub_video][0], self.begin_t, self.end_t]
 
     def run(self):
         reader = easyocr.Reader(
             cfg.ocr_lang_list,
             model_storage_directory=cfg.OCR_MODEL_DIR,
             user_network_directory=cfg.OCR_MODEL_DIR,
-            # TODO: recognizer=False
-            recognizer=True
+            recognizer=False
         )
         det_list = []
         sub_start_t = 0
-        last_text = False
         while True:
             # 读取视频帧
             ret, frame = self.video_cap.read()
             if not ret:
-                print(f"Frame cannot be read {self.vd_path}")
                 break
             if self.begin_t is None and self.end_t is None:
                 self.select_down = False
             timestamp = self.video_cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
             if self.begin_t < timestamp < self.end_t and timestamp % self.det_time == 0:
-                result,_ = reader.detect(frame)
+                result = reader.detect(frame)[0]
                 if not result:
                     continue
                 result = result[0]
-                last_text = (len(result) != 0) #有内容为True
-                out_list=[]
+                last_text = len(result) != 0  # 有内容为True
+                out_list = []
                 if len(result) != 0:
                     result = result[::-1]
-                    out_list=[result[0][2],result[0][3],result[0][0],result[0][1]]
-                    out_list = [max(0,int(i)) for i in out_list]
+                    if len(result)>1 and max([abs(result[0][i+2] - result[1][i+2]) for i in range(2)]) < self.max_dev_loc:
+                       result[0][2] = min(result[0][2], result[1][2])
+                       result[0][3] = max(result[0][3], result[1][3])
+                       result[0][0] = min(result[0][0], result[1][0])
+                       result[0][1] = max(result[0][1], result[1][1])  
+                    out_list = [result[0][2], result[0][3], result[0][0], result[0][1]]
+                    out_list = [max(0, int(i)) for i in out_list]
                 if (
-                        len(out_list) != 0
-                        and len(det_list) != 0
-                        and max([abs(out_list[i] - det_list[-1][0][i]) for i in range(2)]) < self.max_devloc
+                        len(out_list)
+                        and len(det_list)
+                        and max([abs(out_list[i] - det_list[-1][0][i]) for i in range(2)]) < self.max_dev_loc
                 ):
                     det_list[-1][0][0] = min(out_list[0], det_list[-1][0][0])
                     det_list[-1][0][1] = max(out_list[1], det_list[-1][0][1])
@@ -142,18 +147,17 @@ class SubtitleDetector:
                     sub_start_t = timestamp
                 elif last_text is False:
                     sub_start_t = timestamp
-        # if self.print_totaloutlist:
-        #     print("det_list", det_list)
-        det_list = self.del_repeat(det_list)
-        # if self.print_delrepeatoutlist:
-        #     print(det_list)  # (y1, y2, x1, x2)
-        det_list = [self.max_time(det_list)]
-        print(det_list)
+        det_no_repeat = self.del_repeat(det_list)
+        detection_bboxes = self.max_time(det_no_repeat)
+        percent_bboxes=[detection_bboxes[0][0]/self.frame_height,detection_bboxes[0][1]/self.frame_height,detection_bboxes[0][2]/self.frame_width,detection_bboxes[0][3]/self.frame_width]
+        # TODO: detection_bboxes = self.add_margin(detection_bboxes)
+        print(f"Subtitle detecting {self.vd_name}: {detection_bboxes}")
+        print(f"Subtitle percenting {self.vd_name}: {percent_bboxes}")
         # 释放视频对象
         self.video_cap.release()
         # 关闭所有OpenCV窗口
         cv2.destroyAllWindows()
-        return det_list[0][0]
+        return detection_bboxes[0], percent_bboxes
 
 
 class SubtitleRemover:
@@ -331,7 +335,7 @@ def process_files_in_directory(
         if sub_area is None or need_detection:
             need_detection = True
             detector = SubtitleDetector(file_path, begin_t=start_t, end_t=end_t)
-            sub_area = detector.run()
+            sub_area = detector.run()[0]
         remover = SubtitleRemover(
             file_path, sub_area=sub_area, start_t=start_t, end_t=end_t
         )
